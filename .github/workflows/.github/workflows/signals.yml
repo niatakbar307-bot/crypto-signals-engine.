@@ -1,4 +1,4 @@
-name: CryptoTerminal Pro - Signal Engine
+name: .github/workflows/signals.yml
 
 on:
   schedule:

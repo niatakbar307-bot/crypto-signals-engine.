@@ -18,8 +18,8 @@ SB_HEADERS = {
 
 BINANCE_BASE = "https://data-api.binance.vision"
 
-RSI_OVERSOLD = 25
-RSI_OVERBOUGHT = 75
+RSI_OVERSOLD = 30
+RSI_OVERBOUGHT = 70
 
 EXCLUDE_SUFFIXES = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
 
@@ -90,16 +90,13 @@ def check_signal(closes):
     last_rsi = rsi_values[-1]
     last_hist = macd_hist[-1]
     prev_hist = macd_hist[-2]
-    prev2_hist = macd_hist[-3]
 
-    # Strong BUY: RSI deeply oversold + MACD histogram just turned positive
-    # and momentum is genuinely building (not a one-tick flicker)
-    if last_rsi < RSI_OVERSOLD and prev_hist <= 0 < last_hist and last_hist > prev2_hist:
+    # BUY: RSI oversold + MACD histogram just turned positive
+    if last_rsi < RSI_OVERSOLD and prev_hist <= 0 < last_hist:
         return "BUY", last_rsi, last_hist
 
-    # Strong SELL: RSI deeply overbought + MACD histogram just turned negative
-    # and momentum is genuinely building down
-    if last_rsi > RSI_OVERBOUGHT and prev_hist >= 0 > last_hist and last_hist < prev2_hist:
+    # SELL: RSI overbought + MACD histogram just turned negative
+    if last_rsi > RSI_OVERBOUGHT and prev_hist >= 0 > last_hist:
         return "SELL", last_rsi, last_hist
 
     return None, last_rsi, last_hist
@@ -129,7 +126,7 @@ def save_signal(symbol, signal_type, entry_price, rsi, macd_hist):
 def main():
     print("Starting signal engine...")
 
-    symbols = get_top_usdt_symbols(limit=100)
+    symbols = get_top_usdt_symbols(limit=200)
     print(f"Scanning {len(symbols)} symbols...")
 
     signals_found = 0

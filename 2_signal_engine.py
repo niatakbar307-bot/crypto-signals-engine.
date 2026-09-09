@@ -16,7 +16,7 @@ SB_HEADERS = {
     "Content-Type": "application/json",
 }
 
-BINANCE_BASE = "https://api.binance.com"
+BINANCE_BASE = "https://data-api.binance.vision"
 
 RSI_OVERSOLD = 25
 RSI_OVERBOUGHT = 75
@@ -155,5 +155,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-    

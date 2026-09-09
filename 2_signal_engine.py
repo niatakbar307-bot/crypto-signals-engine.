@@ -3,9 +3,6 @@ import sys
 import requests
 from datetime import datetime, timezone
 
-
-from datetime import datetime, timezone
-
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
@@ -21,9 +18,8 @@ SB_HEADERS = {
 
 BINANCE_BASE = "https://api.binance.com"
 
-RSI_OVERSOLD = 30
-RSI_OVERBOUGHT = 70
-SIGNAL_COOLDOWN_SECONDS = 3600
+RSI_OVERSOLD = 25
+RSI_OVERBOUGHT = 75
 
 EXCLUDE_SUFFIXES = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
 
@@ -88,29 +84,25 @@ def calc_macd(closes, fast=12, slow=26, signal=9):
 def check_signal(closes):
     rsi_values = calc_rsi(closes)
     macd_hist = calc_macd(closes)
-    if rsi_values[-1] is None or len(macd_hist) < 2:
+    if rsi_values[-1] is None or len(macd_hist) < 3:
         return None, None, None
+
     last_rsi = rsi_values[-1]
     last_hist = macd_hist[-1]
     prev_hist = macd_hist[-2]
-    if last_rsi < RSI_OVERSOLD and prev_hist <= 0 < last_hist:
+    prev2_hist = macd_hist[-3]
+
+    # Strong BUY: RSI deeply oversold + MACD histogram just turned positive
+    # and momentum is genuinely building (not a one-tick flicker)
+    if last_rsi < RSI_OVERSOLD and prev_hist <= 0 < last_hist and last_hist > prev2_hist:
         return "BUY", last_rsi, last_hist
-    if last_rsi > RSI_OVERBOUGHT and prev_hist >= 0 > last_hist:
+
+    # Strong SELL: RSI deeply overbought + MACD histogram just turned negative
+    # and momentum is genuinely building down
+    if last_rsi > RSI_OVERBOUGHT and prev_hist >= 0 > last_hist and last_hist < prev2_hist:
         return "SELL", last_rsi, last_hist
+
     return None, last_rsi, last_hist
-
-
-def get_seconds_since_last_signal():
-    url = f"{SUPABASE_URL}/rest/v1/last_signal"
-    params = {"select": "created_at", "order": "created_at.desc", "limit": "1"}
-    resp = requests.get(url, headers=SB_HEADERS, params=params, timeout=20)
-    resp.raise_for_status()
-    data = resp.json()
-    if not data:
-        return None
-    last_time = datetime.fromisoformat(data[0]["created_at"].replace("Z", "+00:00"))
-    now = datetime.now(timezone.utc)
-    return (now - last_time).total_seconds()
 
 
 def save_signal(symbol, signal_type, entry_price, rsi, macd_hist):
@@ -137,5 +129,31 @@ def save_signal(symbol, signal_type, entry_price, rsi, macd_hist):
 def main():
     print("Starting signal engine...")
 
-    seconds_since_last = get_seconds_since_last_signal()
-    if seconds_since_last is not None and seconds_since_last
+    symbols = get_top_usdt_symbols(limit=100)
+    print(f"Scanning {len(symbols)} symbols...")
+
+    signals_found = 0
+
+    for symbol in symbols:
+        try:
+            klines = get_klines(symbol, interval="1h", limit=100)
+            closes = [float(k[4]) for k in klines]
+
+            signal_type, rsi, macd_hist = check_signal(closes)
+
+            if signal_type is not None:
+                entry_price = closes[-1]
+                save_signal(symbol, signal_type, entry_price, rsi, macd_hist)
+                signals_found += 1
+
+        except Exception as e:
+            print(f"Error processing {symbol}: {e}")
+            continue
+
+    print(f"Done. Signals found this run: {signals_found}")
+
+
+if __name__ == "__main__":
+    main()
+
+    

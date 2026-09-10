@@ -18,8 +18,8 @@ SB_HEADERS = {
 
 BINANCE_BASE = "https://data-api.binance.vision"
 
-RSI_OVERSOLD = 30
-RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 20
+RSI_OVERBOUGHT = 80
 
 EXCLUDE_SUFFIXES = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
 
@@ -41,6 +41,14 @@ def get_klines(symbol, interval="1h", limit=100):
     resp = requests.get(f"{BINANCE_BASE}/api/v3/klines", params=params, timeout=20)
     resp.raise_for_status()
     return resp.json()
+
+
+def has_volume_confirmation(volumes, lookback=20, multiplier=1.5):
+    if len(volumes) < lookback + 1:
+        return False
+    last_volume = volumes[-1]
+    avg_volume = sum(volumes[-(lookback + 1):-1]) / lookback
+    return avg_volume > 0 and last_volume >= avg_volume * multiplier
 
 
 def calc_rsi(closes, period=14):
@@ -91,9 +99,11 @@ def check_signal(closes):
     last_hist = macd_hist[-1]
     prev_hist = macd_hist[-2]
 
+    # BUY: RSI oversold + MACD histogram just turned positive
     if last_rsi < RSI_OVERSOLD and prev_hist <= 0 < last_hist:
         return "BUY", last_rsi, last_hist
 
+    # SELL: RSI overbought + MACD histogram just turned negative
     if last_rsi > RSI_OVERBOUGHT and prev_hist >= 0 > last_hist:
         return "SELL", last_rsi, last_hist
 
@@ -110,10 +120,10 @@ def has_open_position(symbol):
 
 def calc_levels(signal_type, entry_price):
     if signal_type == "BUY":
-        stop_loss = entry_price * 0.985
+        stop_loss = entry_price * 0.975
         targets = [entry_price * (1 + p) for p in (0.005, 0.010, 0.015, 0.020, 0.025)]
     else:
-        stop_loss = entry_price * 1.015
+        stop_loss = entry_price * 1.025
         targets = [entry_price * (1 - p) for p in (0.005, 0.010, 0.015, 0.020, 0.025)]
     return stop_loss, targets
 
@@ -159,10 +169,14 @@ def main():
         try:
             klines = get_klines(symbol, interval="1h", limit=100)
             closes = [float(k[4]) for k in klines]
+            volumes = [float(k[5]) for k in klines]
 
             signal_type, rsi, macd_hist = check_signal(closes)
 
             if signal_type is not None:
+                if not has_volume_confirmation(volumes):
+                    print(f"Skip {symbol}: no volume confirmation.")
+                    continue
                 if has_open_position(symbol):
                     print(f"Skip {symbol}: already has an open position.")
                     continue
@@ -179,4 +193,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+

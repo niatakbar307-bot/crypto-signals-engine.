@@ -91,18 +91,35 @@ def check_signal(closes):
     last_hist = macd_hist[-1]
     prev_hist = macd_hist[-2]
 
-    # BUY: RSI oversold + MACD histogram just turned positive
     if last_rsi < RSI_OVERSOLD and prev_hist <= 0 < last_hist:
         return "BUY", last_rsi, last_hist
 
-    # SELL: RSI overbought + MACD histogram just turned negative
     if last_rsi > RSI_OVERBOUGHT and prev_hist >= 0 > last_hist:
         return "SELL", last_rsi, last_hist
 
     return None, last_rsi, last_hist
 
 
+def has_open_position(symbol):
+    url = f"{SUPABASE_URL}/rest/v1/positions"
+    params = {"symbol": f"eq.{symbol}", "status": "eq.open", "select": "id", "limit": "1"}
+    resp = requests.get(url, headers=SB_HEADERS, params=params, timeout=20)
+    resp.raise_for_status()
+    return len(resp.json()) > 0
+
+
+def calc_levels(signal_type, entry_price):
+    if signal_type == "BUY":
+        stop_loss = entry_price * 0.985
+        targets = [entry_price * (1 + p) for p in (0.005, 0.010, 0.015, 0.020, 0.025)]
+    else:
+        stop_loss = entry_price * 1.015
+        targets = [entry_price * (1 - p) for p in (0.005, 0.010, 0.015, 0.020, 0.025)]
+    return stop_loss, targets
+
+
 def save_signal(symbol, signal_type, entry_price, rsi, macd_hist):
+    stop_loss, targets = calc_levels(signal_type, entry_price)
     positions_url = f"{SUPABASE_URL}/rest/v1/positions"
     payload = {
         "symbol": symbol,
@@ -111,6 +128,13 @@ def save_signal(symbol, signal_type, entry_price, rsi, macd_hist):
         "rsi": rsi,
         "macd_hist": macd_hist,
         "status": "open",
+        "stop_loss": stop_loss,
+        "target_1": targets[0],
+        "target_2": targets[1],
+        "target_3": targets[2],
+        "target_4": targets[3],
+        "target_5": targets[4],
+        "targets_hit": 0,
     }
     r = requests.post(positions_url, headers=SB_HEADERS, json=payload, timeout=20)
     r.raise_for_status()
@@ -139,6 +163,9 @@ def main():
             signal_type, rsi, macd_hist = check_signal(closes)
 
             if signal_type is not None:
+                if has_open_position(symbol):
+                    print(f"Skip {symbol}: already has an open position.")
+                    continue
                 entry_price = closes[-1]
                 save_signal(symbol, signal_type, entry_price, rsi, macd_hist)
                 signals_found += 1
@@ -152,3 +179,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

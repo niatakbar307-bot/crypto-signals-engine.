@@ -1,4 +1,4 @@
-import os
+    import os
 import sys
 import requests
 from datetime import datetime, timezone
@@ -18,8 +18,8 @@ SB_HEADERS = {
 
 BINANCE_BASE = "https://data-api.binance.vision"
 
-RSI_OVERSOLD = 20
-RSI_OVERBOUGHT = 80
+RSI_OVERSOLD = 25
+RSI_OVERBOUGHT = 75
 
 EXCLUDE_SUFFIXES = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
 
@@ -43,7 +43,7 @@ def get_klines(symbol, interval="1h", limit=100):
     return resp.json()
 
 
-def has_volume_confirmation(volumes, lookback=20, multiplier=1.5):
+def has_volume_confirmation(volumes, lookback=20, multiplier=1.3):
     if len(volumes) < lookback + 1:
         return False
     last_volume = volumes[-1]
@@ -193,4 +193,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

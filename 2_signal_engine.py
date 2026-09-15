@@ -18,8 +18,8 @@ SB_HEADERS = {
 
 BINANCE_BASE = "https://data-api.binance.vision"
 
-RSI_OVERSOLD = 25
-RSI_OVERBOUGHT = 75
+RSI_OVERSOLD = 30
+RSI_OVERBOUGHT = 70
 
 EXCLUDE_SUFFIXES = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
 
@@ -72,42 +72,28 @@ def calc_rsi(closes, period=14):
     return rsi_values
 
 
-def ema(values, period):
-    k = 2 / (period + 1)
-    ema_values = [values[0]]
-    for price in values[1:]:
-        ema_values.append(price * k + ema_values[-1] * (1 - k))
-    return ema_values
-
-
-def calc_macd(closes, fast=12, slow=26, signal=9):
-    ema_fast = ema(closes, fast)
-    ema_slow = ema(closes, slow)
-    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
-    signal_line = ema(macd_line, signal)
-    histogram = [m - s for m, s in zip(macd_line, signal_line)]
-    return histogram
-
-
 def check_signal(closes):
-    rsi_values = calc_rsi(closes)
-    macd_hist = calc_macd(closes)
-    if rsi_values[-1] is None or len(macd_hist) < 3:
-        return None, None, None
+    """
+    RSI(14) کراس-بیک لاجک:
+    BUY: RSI 30 کو چھو چکا/نیچے جا چکا تھا، اب واپس 30 سے اوپر آیا
+    SELL: RSI 70 کو چھو چکا/اوپر جا چکا تھا، اب واپس 70 سے نیچے آیا
+    """
+    rsi_values = calc_rsi(closes, period=14)
+    if rsi_values[-1] is None or rsi_values[-2] is None:
+        return None, None
 
     last_rsi = rsi_values[-1]
-    last_hist = macd_hist[-1]
-    prev_hist = macd_hist[-2]
+    prev_rsi = rsi_values[-2]
 
-    # BUY: RSI oversold + MACD histogram just turned positive
-    if last_rsi < RSI_OVERSOLD and prev_hist <= 0 < last_hist:
-        return "BUY", last_rsi, last_hist
+    # BUY: پچھلی کینڈل 30 پر یا اس سے نیچے تھی، ابھی 30 سے اوپر بند ہوئی
+    if prev_rsi <= RSI_OVERSOLD < last_rsi:
+        return "BUY", last_rsi
 
-    # SELL: RSI overbought + MACD histogram just turned negative
-    if last_rsi > RSI_OVERBOUGHT and prev_hist >= 0 > last_hist:
-        return "SELL", last_rsi, last_hist
+    # SELL: پچھلی کینڈل 70 پر یا اس سے اوپر تھی، ابھی 70 سے نیچے بند ہوئی
+    if prev_rsi >= RSI_OVERBOUGHT > last_rsi:
+        return "SELL", last_rsi
 
-    return None, last_rsi, last_hist
+    return None, last_rsi
 
 
 def has_open_position(symbol):
@@ -128,7 +114,7 @@ def calc_levels(signal_type, entry_price):
     return stop_loss, targets
 
 
-def save_signal(symbol, signal_type, entry_price, rsi, macd_hist):
+def save_signal(symbol, signal_type, entry_price, rsi):
     stop_loss, targets = calc_levels(signal_type, entry_price)
     positions_url = f"{SUPABASE_URL}/rest/v1/positions"
     payload = {
@@ -136,7 +122,6 @@ def save_signal(symbol, signal_type, entry_price, rsi, macd_hist):
         "signal_type": signal_type,
         "entry_price": entry_price,
         "rsi": rsi,
-        "macd_hist": macd_hist,
         "status": "open",
         "stop_loss": stop_loss,
         "target_1": targets[0],
@@ -171,7 +156,7 @@ def main():
             closes = [float(k[4]) for k in klines]
             volumes = [float(k[5]) for k in klines]
 
-            signal_type, rsi, macd_hist = check_signal(closes)
+            signal_type, rsi = check_signal(closes)
 
             if signal_type is not None:
                 if not has_volume_confirmation(volumes):
@@ -181,7 +166,7 @@ def main():
                     print(f"Skip {symbol}: already has an open position.")
                     continue
                 entry_price = closes[-1]
-                save_signal(symbol, signal_type, entry_price, rsi, macd_hist)
+                save_signal(symbol, signal_type, entry_price, rsi)
                 signals_found += 1
 
         except Exception as e:
@@ -193,4 +178,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

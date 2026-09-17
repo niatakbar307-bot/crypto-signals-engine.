@@ -104,13 +104,43 @@ def has_open_position(symbol):
     return len(resp.json()) > 0
 
 
+COOLDOWN_HOURS = 12
+
+
+def is_in_cooldown(symbol, cooldown_hours=COOLDOWN_HOURS):
+    """
+    اسی کوائن پر آخری سگنل (چاہے وہ بند ہو چکا ہو) کے بعد
+    cooldown_hours گھنٹے مکمل نہیں ہوئے تو True لوٹائے گا۔
+    """
+    url = f"{SUPABASE_URL}/rest/v1/positions"
+    params = {
+        "symbol": f"eq.{symbol}",
+        "select": "created_at",
+        "order": "created_at.desc",
+        "limit": "1",
+    }
+    resp = requests.get(url, headers=SB_HEADERS, params=params, timeout=20)
+    resp.raise_for_status()
+    rows = resp.json()
+    if not rows:
+        return False
+
+    last_created = rows[0].get("created_at")
+    if not last_created:
+        return False
+
+    last_time = datetime.fromisoformat(last_created.replace("Z", "+00:00"))
+    elapsed_hours = (datetime.now(timezone.utc) - last_time).total_seconds() / 3600
+    return elapsed_hours < cooldown_hours
+
+
 def calc_levels(signal_type, entry_price):
     if signal_type == "BUY":
-        stop_loss = entry_price * 0.975
-        targets = [entry_price * (1 + p) for p in (0.005, 0.010, 0.015, 0.020, 0.025)]
+        stop_loss = entry_price * 0.95
+        targets = [entry_price * (1 + p) for p in (0.05, 0.10, 0.15, 0.20, 0.25)]
     else:
-        stop_loss = entry_price * 1.025
-        targets = [entry_price * (1 - p) for p in (0.005, 0.010, 0.015, 0.020, 0.025)]
+        stop_loss = entry_price * 1.05
+        targets = [entry_price * (1 - p) for p in (0.05, 0.10, 0.15, 0.20, 0.25)]
     return stop_loss, targets
 
 
@@ -164,6 +194,9 @@ def main():
                     continue
                 if has_open_position(symbol):
                     print(f"Skip {symbol}: already has an open position.")
+                    continue
+                if is_in_cooldown(symbol):
+                    print(f"Skip {symbol}: cooldown active.")
                     continue
                 entry_price = closes[-1]
                 save_signal(symbol, signal_type, entry_price, rsi)

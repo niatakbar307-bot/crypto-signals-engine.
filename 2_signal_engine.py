@@ -17,9 +17,7 @@ SB_HEADERS = {
 }
 
 BINANCE_BASE = "https://data-api.binance.vision"
-
-RSI_OVERSOLD = 30
-RSI_OVERBOUGHT = 70
+FUTURES_BASE = "https://fapi.binance.com"
 
 EXCLUDE_SUFFIXES = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
 
@@ -39,6 +37,20 @@ def get_top_usdt_symbols(limit=100):
 def get_klines(symbol, interval="1h", limit=100):
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     resp = requests.get(f"{BINANCE_BASE}/api/v3/klines", params=params, timeout=20)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_open_interest_hist(symbol, period="1h", limit=6):
+    params = {"symbol": symbol, "period": period, "limit": limit}
+    resp = requests.get(f"{FUTURES_BASE}/futures/data/openInterestHist", params=params, timeout=20)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_top_long_short_ratio(symbol, period="1h", limit=6):
+    params = {"symbol": symbol, "period": period, "limit": limit}
+    resp = requests.get(f"{FUTURES_BASE}/futures/data/topLongShortPositionRatio", params=params, timeout=20)
     resp.raise_for_status()
     return resp.json()
 
@@ -72,28 +84,76 @@ def calc_rsi(closes, period=14):
     return rsi_values
 
 
-def check_signal(closes):
+def ema(values, period):
+    k = 2 / (period + 1)
+    ema_values = [values[0]]
+    for price in values[1:]:
+        ema_values.append(price * k + ema_values[-1] * (1 - k))
+    return ema_values
+
+
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+
+
+def whales_still_active(symbol, direction):
     """
-    RSI(14) کراس-بیک لاجک:
-    BUY: RSI 30 کو چھو چکا/نیچے جا چکا تھا، اب واپس 30 سے اوپر آیا
-    SELL: RSI 70 کو چھو چکا/اوپر جا چکا تھا، اب واپس 70 سے نیچے آیا
+    direction: "up" (RSI overbought زون) یا "down" (RSI oversold زون)
+    True: وہیلز ابھی اسی سمت میں سرگرم ہیں (OI اور متعلقہ Long/Short % دونوں بڑھ رہے ہیں) -> ٹرینڈ جاری رہنے کا امکان
+    False: وہیلز کی سرگرمی کمزور پڑ رہی ہے -> ریورسل کا امکان
+    None: Futures ڈیٹا دستیاب نہیں (شاید یہ کوائن Futures میں لسٹ نہیں)
+    """
+    try:
+        oi_data = get_open_interest_hist(symbol)
+        ls_data = get_top_long_short_ratio(symbol)
+    except Exception:
+        return None
+
+    if len(oi_data) < 3 or len(ls_data) < 3:
+        return None
+
+    oi_values = [float(d["sumOpenInterest"]) for d in oi_data]
+    long_pcts = [float(d["longAccount"]) for d in ls_data]
+
+    oi_rising = oi_values[-1] > oi_values[0]
+
+    if direction == "up":
+        long_pct_rising = long_pcts[-1] > long_pcts[0]
+        return oi_rising and long_pct_rising
+    else:
+        short_pcts_rising = (1 - long_pcts[-1]) > (1 - long_pcts[0])
+        return oi_rising and short_pcts_rising
+
+
+def check_signal(symbol, closes):
+    """
+    RSI(14) صرف ٹرگر زون کے طور پر:
+    - RSI >= 70 (overbought) -> چیک کریں وہیلز ابھی اوپر سرگرم ہیں یا نہیں
+        سرگرم -> BUY (ٹرینڈ جاری، ساتھ چلیں)
+        غیر سرگرم -> SELL (ریورسل)
+    - RSI <= 30 (oversold) -> چیک کریں وہیلز ابھی نیچے سرگرم ہیں یا نہیں
+        سرگرم -> SELL (مزید نیچے جانے کا امکان)
+        غیر سرگرم -> BUY (ریورسل)
+    Futures ڈیٹا نہ ملے تو سگنل نہیں دیا جاتا (None)۔
     """
     rsi_values = calc_rsi(closes, period=14)
-    if rsi_values[-1] is None or rsi_values[-2] is None:
+    current_rsi = rsi_values[-1]
+    if current_rsi is None:
         return None, None
 
-    last_rsi = rsi_values[-1]
-    prev_rsi = rsi_values[-2]
+    if current_rsi >= RSI_OVERBOUGHT:
+        active = whales_still_active(symbol, "up")
+        if active is None:
+            return None, current_rsi
+        return ("BUY" if active else "SELL"), current_rsi
 
-    # BUY: پچھلی کینڈل 30 پر یا اس سے نیچے تھی، ابھی 30 سے اوپر بند ہوئی
-    if prev_rsi <= RSI_OVERSOLD < last_rsi:
-        return "BUY", last_rsi
+    if current_rsi <= RSI_OVERSOLD:
+        active = whales_still_active(symbol, "down")
+        if active is None:
+            return None, current_rsi
+        return ("SELL" if active else "BUY"), current_rsi
 
-    # SELL: پچھلی کینڈل 70 پر یا اس سے اوپر تھی، ابھی 70 سے نیچے بند ہوئی
-    if prev_rsi >= RSI_OVERBOUGHT > last_rsi:
-        return "SELL", last_rsi
-
-    return None, last_rsi
+    return None, current_rsi
 
 
 def has_open_position(symbol):
@@ -186,7 +246,7 @@ def main():
             closes = [float(k[4]) for k in klines]
             volumes = [float(k[5]) for k in klines]
 
-            signal_type, rsi = check_signal(closes)
+            signal_type, rsi = check_signal(symbol, closes)
 
             if signal_type is not None:
                 if not has_volume_confirmation(volumes):

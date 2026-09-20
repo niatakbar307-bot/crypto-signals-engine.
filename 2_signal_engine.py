@@ -17,13 +17,12 @@ SB_HEADERS = {
 }
 
 BINANCE_BASE = "https://data-api.binance.vision"
-FUTURES_BASE = "https://fapi.binance.com"
 
 EXCLUDE_SUFFIXES = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
 
 
 def get_top_usdt_symbols(limit=100):
-    resp = requests.get(f"{FUTURES_BASE}/fapi/v1/ticker/24hr", timeout=20)
+    resp = requests.get(f"{BINANCE_BASE}/api/v3/ticker/24hr", timeout=20)
     resp.raise_for_status()
     data = resp.json()
     usdt_pairs = [
@@ -36,21 +35,7 @@ def get_top_usdt_symbols(limit=100):
 
 def get_klines(symbol, interval="1h", limit=100):
     params = {"symbol": symbol, "interval": interval, "limit": limit}
-    resp = requests.get(f"{FUTURES_BASE}/fapi/v1/klines", params=params, timeout=20)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def get_open_interest_hist(symbol, period="1h", limit=6):
-    params = {"symbol": symbol, "period": period, "limit": limit}
-    resp = requests.get(f"{FUTURES_BASE}/futures/data/openInterestHist", params=params, timeout=20)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def get_top_long_short_ratio(symbol, period="1h", limit=6):
-    params = {"symbol": symbol, "period": period, "limit": limit}
-    resp = requests.get(f"{FUTURES_BASE}/futures/data/topLongShortPositionRatio", params=params, timeout=20)
+    resp = requests.get(f"{BINANCE_BASE}/api/v3/klines", params=params, timeout=20)
     resp.raise_for_status()
     return resp.json()
 
@@ -92,74 +77,47 @@ def ema(values, period):
     return ema_values
 
 
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-
-
-def whales_still_active(symbol, direction):
-    """
-    direction: "up" (RSI overbought زون) یا "down" (RSI oversold زون)
-    True: وہیلز ابھی اسی سمت میں سرگرم ہیں (OI اور متعلقہ Long/Short % دونوں بڑھ رہے ہیں) -> ٹرینڈ جاری رہنے کا امکان
-    False: وہیلز کی سرگرمی کمزور پڑ رہی ہے -> ریورسل کا امکان
-    None: Futures ڈیٹا دستیاب نہیں (شاید یہ کوائن Futures میں لسٹ نہیں)
-    """
-    try:
-        oi_data = get_open_interest_hist(symbol)
-        ls_data = get_top_long_short_ratio(symbol)
-    except Exception:
-        return None
-
-    if len(oi_data) < 3 or len(ls_data) < 3:
-        return None
-
-    oi_values = [float(d["sumOpenInterest"]) for d in oi_data]
-    long_pcts = [float(d["longAccount"]) for d in ls_data]
-
-    # شور کم کرنے کے لیے شروع کی 2 اور آخر کی 2 ریڈنگز کی اوسط لیں
-    oi_start = sum(oi_values[:2]) / 2
-    oi_end = sum(oi_values[-2:]) / 2
-    long_start = sum(long_pcts[:2]) / 2
-    long_end = sum(long_pcts[-2:]) / 2
-
-    oi_rising = oi_end > oi_start
-
-    if direction == "up":
-        long_pct_rising = long_end > long_start
-        return oi_rising and long_pct_rising
-    else:
-        short_start = 1 - long_start
-        short_end = 1 - long_end
-        short_pcts_rising = short_end > short_start
-        return oi_rising and short_pcts_rising
+PULLBACK_TOLERANCE = 0.005  # EMA20 کے 0.5% اندر آنا "ٹچ" شمار ہوگا
+PULLBACK_LOOKBACK = 4       # پچھلی کتنی کینڈلز میں pullback تلاش کریں
+TREND_LOOKBACK = 10         # ٹرینڈ سمت جانچنے کے لیے EMA50 کتنی کینڈلز پیچھے دیکھیں
 
 
 def check_signal(symbol, closes):
     """
-    RSI(14) صرف ٹرگر زون کے طور پر:
-    - RSI >= 70 (overbought) -> چیک کریں وہیلز ابھی اوپر سرگرم ہیں یا نہیں
-        سرگرم -> BUY (ٹرینڈ جاری، ساتھ چلیں)
-        غیر سرگرم -> SELL (ریورسل)
-    - RSI <= 30 (oversold) -> چیک کریں وہیلز ابھی نیچے سرگرم ہیں یا نہیں
-        سرگرم -> SELL (مزید نیچے جانے کا امکان)
-        غیر سرگرم -> BUY (ریورسل)
-    Futures ڈیٹا نہ ملے تو سگنل نہیں دیا جاتا (None)۔
+    Pullback Entry لاجک (ٹرینڈ کی سمت میں):
+    - ٹرینڈ اپ (EMA50 اوپر جا رہا ہو) اور قیمت حال ہی میں EMA20 کے قریب آ کر
+      واپس اوپر بند ہوئی + سبز کینڈل -> BUY
+    - ٹرینڈ ڈاؤن (EMA50 نیچے جا رہا ہو) اور قیمت حال ہی میں EMA20 کے قریب آ کر
+      واپس نیچے بند ہوئی + لال کینڈل -> SELL
+    RSI صرف ریکارڈ/مانیٹرنگ کے لیے ساتھ محفوظ کیا جاتا ہے، فیصلے میں استعمال نہیں ہوتا۔
     """
-    rsi_values = calc_rsi(closes, period=14)
-    current_rsi = rsi_values[-1]
-    if current_rsi is None:
+    if len(closes) < 55:
         return None, None
 
-    if current_rsi >= RSI_OVERBOUGHT:
-        active = whales_still_active(symbol, "up")
-        if active is None:
-            return None, current_rsi
-        return ("BUY" if active else "SELL"), current_rsi
+    rsi_values = calc_rsi(closes, period=14)
+    current_rsi = rsi_values[-1]
 
-    if current_rsi <= RSI_OVERSOLD:
-        active = whales_still_active(symbol, "down")
-        if active is None:
-            return None, current_rsi
-        return ("SELL" if active else "BUY"), current_rsi
+    ema20_values = ema(closes, 20)
+    ema50_values = ema(closes, 50)
+
+    last_close = closes[-1]
+    prev_close = closes[-2]
+    last_ema20 = ema20_values[-1]
+    last_ema50 = ema50_values[-1]
+
+    trend_up = last_ema50 > ema50_values[-TREND_LOOKBACK]
+    trend_down = last_ema50 < ema50_values[-TREND_LOOKBACK]
+
+    touched_ema20 = any(
+        abs(closes[i] - ema20_values[i]) / ema20_values[i] <= PULLBACK_TOLERANCE
+        for i in range(len(closes) - PULLBACK_LOOKBACK, len(closes) - 1)
+    )
+
+    if trend_up and touched_ema20 and last_close > last_ema20 and last_close > prev_close:
+        return "BUY", current_rsi
+
+    if trend_down and touched_ema20 and last_close < last_ema20 and last_close < prev_close:
+        return "SELL", current_rsi
 
     return None, current_rsi
 

@@ -23,7 +23,7 @@ EXCLUDE_SUFFIXES = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
 
 
 def get_top_usdt_symbols(limit=100):
-    resp = requests.get(f"{BINANCE_BASE}/api/v3/ticker/24hr", timeout=20)
+    resp = requests.get(f"{FUTURES_BASE}/fapi/v1/ticker/24hr", timeout=20)
     resp.raise_for_status()
     data = resp.json()
     usdt_pairs = [
@@ -36,7 +36,7 @@ def get_top_usdt_symbols(limit=100):
 
 def get_klines(symbol, interval="1h", limit=100):
     params = {"symbol": symbol, "interval": interval, "limit": limit}
-    resp = requests.get(f"{BINANCE_BASE}/api/v3/klines", params=params, timeout=20)
+    resp = requests.get(f"{FUTURES_BASE}/fapi/v1/klines", params=params, timeout=20)
     resp.raise_for_status()
     return resp.json()
 
@@ -115,13 +115,21 @@ def whales_still_active(symbol, direction):
     oi_values = [float(d["sumOpenInterest"]) for d in oi_data]
     long_pcts = [float(d["longAccount"]) for d in ls_data]
 
-    oi_rising = oi_values[-1] > oi_values[0]
+    # شور کم کرنے کے لیے شروع کی 2 اور آخر کی 2 ریڈنگز کی اوسط لیں
+    oi_start = sum(oi_values[:2]) / 2
+    oi_end = sum(oi_values[-2:]) / 2
+    long_start = sum(long_pcts[:2]) / 2
+    long_end = sum(long_pcts[-2:]) / 2
+
+    oi_rising = oi_end > oi_start
 
     if direction == "up":
-        long_pct_rising = long_pcts[-1] > long_pcts[0]
+        long_pct_rising = long_end > long_start
         return oi_rising and long_pct_rising
     else:
-        short_pcts_rising = (1 - long_pcts[-1]) > (1 - long_pcts[0])
+        short_start = 1 - long_start
+        short_end = 1 - long_end
+        short_pcts_rising = short_end > short_start
         return oi_rising and short_pcts_rising
 
 

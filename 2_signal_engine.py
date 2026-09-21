@@ -77,12 +77,39 @@ def ema(values, period):
     return ema_values
 
 
+# --- نیا حصہ: ATR (Average True Range) ---
+# ATR بتاتا ہے کہ کوائن عام طور پر ایک کینڈل میں کتنا حرکت کرتا ہے۔
+# اسے ہائی، لو اور پچھلے کلوز کی بنیاد پر نکالا جاتا ہے (Wilder's smoothing)۔
+def calc_atr(highs, lows, closes, period=14):
+    if len(closes) < period + 1:
+        return None
+
+    true_ranges = []
+    for i in range(1, len(closes)):
+        high_low = highs[i] - lows[i]
+        high_prev_close = abs(highs[i] - closes[i - 1])
+        low_prev_close = abs(lows[i] - closes[i - 1])
+        true_ranges.append(max(high_low, high_prev_close, low_prev_close))
+
+    # پہلا ATR = پہلی 'period' true ranges کا سادہ اوسط
+    atr = sum(true_ranges[:period]) / period
+    # اس کے بعد Wilder's smoothing سے آگے بڑھایا جاتا ہے
+    for tr in true_ranges[period:]:
+        atr = (atr * (period - 1) + tr) / period
+
+    return atr
+
+
 PULLBACK_TOLERANCE = 0.005  # EMA20 کے 0.5% اندر آنا "ٹچ" شمار ہوگا
 PULLBACK_LOOKBACK = 4       # پچھلی کتنی کینڈلز میں pullback تلاش کریں
 TREND_LOOKBACK = 10         # ٹرینڈ سمت جانچنے کے لیے EMA50 کتنی کینڈلز پیچھے دیکھیں
 
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 1.5   # سٹاپ لاس = entry ± (ATR × یہ عدد)
+ATR_TARGET_MULTIPLIERS = (1.5, 3.0, 4.5, 6.0, 7.5)  # ٹارگٹس بھی ATR پر مبنی
 
-def check_signal(symbol, closes):
+
+def check_signal(symbol, highs, lows, closes):
     """
     Pullback Entry لاجک (ٹرینڈ کی سمت میں):
     - ٹرینڈ اپ (EMA50 اوپر جا رہا ہو) اور قیمت حال ہی میں EMA20 کے قریب آ کر
@@ -92,10 +119,12 @@ def check_signal(symbol, closes):
     RSI صرف ریکارڈ/مانیٹرنگ کے لیے ساتھ محفوظ کیا جاتا ہے، فیصلے میں استعمال نہیں ہوتا۔
     """
     if len(closes) < 55:
-        return None, None
+        return None, None, None
 
     rsi_values = calc_rsi(closes, period=14)
     current_rsi = rsi_values[-1]
+
+    atr = calc_atr(highs, lows, closes, period=ATR_PERIOD)
 
     ema20_values = ema(closes, 20)
     ema50_values = ema(closes, 50)
@@ -114,12 +143,12 @@ def check_signal(symbol, closes):
     )
 
     if trend_up and touched_ema20 and last_close > last_ema20 and last_close > prev_close:
-        return "BUY", current_rsi
+        return "BUY", current_rsi, atr
 
     if trend_down and touched_ema20 and last_close < last_ema20 and last_close < prev_close:
-        return "SELL", current_rsi
+        return "SELL", current_rsi, atr
 
-    return None, current_rsi
+    return None, current_rsi, atr
 
 
 def has_open_position(symbol):
@@ -160,24 +189,31 @@ def is_in_cooldown(symbol, cooldown_hours=COOLDOWN_HOURS):
     return elapsed_hours < cooldown_hours
 
 
-def calc_levels(signal_type, entry_price):
+# --- تبدیل شدہ حصہ: اب سٹاپ لاس اور ٹارگٹس فکسڈ % کی بجائے ATR پر مبنی ہیں ---
+# جتنا کوائن زیادہ اچھلتا کودتا (volatile) ہوگا، اتنا ہی سٹاپ لاس خودکار دور ہوگا،
+# اور جتنا پرسکون ہوگا اتنا ہی سٹاپ قریب رہے گا۔
+def calc_levels(signal_type, entry_price, atr):
+    stop_distance = atr * ATR_STOP_MULTIPLIER
+
     if signal_type == "BUY":
-        stop_loss = entry_price * 0.95
-        targets = [entry_price * (1 + p) for p in (0.05, 0.10, 0.15, 0.20, 0.25)]
+        stop_loss = entry_price - stop_distance
+        targets = [entry_price + (atr * m) for m in ATR_TARGET_MULTIPLIERS]
     else:
-        stop_loss = entry_price * 1.05
-        targets = [entry_price * (1 - p) for p in (0.05, 0.10, 0.15, 0.20, 0.25)]
+        stop_loss = entry_price + stop_distance
+        targets = [entry_price - (atr * m) for m in ATR_TARGET_MULTIPLIERS]
+
     return stop_loss, targets
 
 
-def save_signal(symbol, signal_type, entry_price, rsi):
-    stop_loss, targets = calc_levels(signal_type, entry_price)
+def save_signal(symbol, signal_type, entry_price, rsi, atr):
+    stop_loss, targets = calc_levels(signal_type, entry_price, atr)
     positions_url = f"{SUPABASE_URL}/rest/v1/positions"
     payload = {
         "symbol": symbol,
         "signal_type": signal_type,
         "entry_price": entry_price,
         "rsi": rsi,
+        "atr": atr,
         "status": "open",
         "stop_loss": stop_loss,
         "target_1": targets[0],
@@ -195,7 +231,7 @@ def save_signal(symbol, signal_type, entry_price, rsi):
     r2 = requests.post(last_signal_url, headers=SB_HEADERS, json=payload2, timeout=20)
     r2.raise_for_status()
 
-    print(f"Signal saved: {symbol} -> {signal_type} @ {entry_price}")
+    print(f"Signal saved: {symbol} -> {signal_type} @ {entry_price} (ATR={atr}, SL={stop_loss})")
 
 
 def main():
@@ -209,10 +245,12 @@ def main():
     for symbol in symbols:
         try:
             klines = get_klines(symbol, interval="1h", limit=100)
+            highs = [float(k[2]) for k in klines]
+            lows = [float(k[3]) for k in klines]
             closes = [float(k[4]) for k in klines]
             volumes = [float(k[5]) for k in klines]
 
-            signal_type, rsi = check_signal(symbol, closes)
+            signal_type, rsi, atr = check_signal(symbol, highs, lows, closes)
 
             if signal_type is not None:
                 if not has_volume_confirmation(volumes):
@@ -224,8 +262,11 @@ def main():
                 if is_in_cooldown(symbol):
                     print(f"Skip {symbol}: cooldown active.")
                     continue
+                if not atr or atr <= 0:
+                    print(f"Skip {symbol}: invalid ATR.")
+                    continue
                 entry_price = closes[-1]
-                save_signal(symbol, signal_type, entry_price, rsi)
+                save_signal(symbol, signal_type, entry_price, rsi, atr)
                 signals_found += 1
 
         except Exception as e:

@@ -1,7 +1,6 @@
 import os
 import sys
 import requests
-from datetime import datetime, timezone
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
@@ -77,9 +76,8 @@ def ema(values, period):
     return ema_values
 
 
-# --- نیا حصہ: ATR (Average True Range) ---
-# ATR بتاتا ہے کہ کوائن عام طور پر ایک کینڈل میں کتنا حرکت کرتا ہے۔
-# اسے ہائی، لو اور پچھلے کلوز کی بنیاد پر نکالا جاتا ہے (Wilder's smoothing)۔
+# ATR (Average True Range): کوائن عام طور پر ایک کینڈل میں کتنا حرکت کرتا ہے
+# (Wilder's smoothing کے ساتھ)
 def calc_atr(highs, lows, closes, period=14):
     if len(closes) < period + 1:
         return None
@@ -91,9 +89,7 @@ def calc_atr(highs, lows, closes, period=14):
         low_prev_close = abs(lows[i] - closes[i - 1])
         true_ranges.append(max(high_low, high_prev_close, low_prev_close))
 
-    # پہلا ATR = پہلی 'period' true ranges کا سادہ اوسط
     atr = sum(true_ranges[:period]) / period
-    # اس کے بعد Wilder's smoothing سے آگے بڑھایا جاتا ہے
     for tr in true_ranges[period:]:
         atr = (atr * (period - 1) + tr) / period
 
@@ -106,7 +102,8 @@ TREND_LOOKBACK = 10         # ٹرینڈ سمت جانچنے کے لیے EMA50 �
 
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 1.5   # سٹاپ لاس = entry ± (ATR × یہ عدد)
-ATR_TARGET_MULTIPLIERS = (1.5, 3.0, 4.5, 6.0, 7.5)  # ٹارگٹس بھی ATR پر مبنی
+# پہلا ٹارگٹ 2.25 ATR (سٹاپ سے 1.5 گنا بڑا) — تاکہ 40% سے اوپر win rate پر بھی منافع ہو
+ATR_TARGET_MULTIPLIERS = (2.25, 3.0, 4.5, 6.0, 7.5)
 
 
 def check_signal(symbol, highs, lows, closes):
@@ -159,39 +156,8 @@ def has_open_position(symbol):
     return len(resp.json()) > 0
 
 
-COOLDOWN_HOURS = 12
-
-
-def is_in_cooldown(symbol, cooldown_hours=COOLDOWN_HOURS):
-    """
-    اسی کوائن پر آخری سگنل (چاہے وہ بند ہو چکا ہو) کے بعد
-    cooldown_hours گھنٹے مکمل نہیں ہوئے تو True لوٹائے گا۔
-    """
-    url = f"{SUPABASE_URL}/rest/v1/positions"
-    params = {
-        "symbol": f"eq.{symbol}",
-        "select": "created_at",
-        "order": "created_at.desc",
-        "limit": "1",
-    }
-    resp = requests.get(url, headers=SB_HEADERS, params=params, timeout=20)
-    resp.raise_for_status()
-    rows = resp.json()
-    if not rows:
-        return False
-
-    last_created = rows[0].get("created_at")
-    if not last_created:
-        return False
-
-    last_time = datetime.fromisoformat(last_created.replace("Z", "+00:00"))
-    elapsed_hours = (datetime.now(timezone.utc) - last_time).total_seconds() / 3600
-    return elapsed_hours < cooldown_hours
-
-
-# --- تبدیل شدہ حصہ: اب سٹاپ لاس اور ٹارگٹس فکسڈ % کی بجائے ATR پر مبنی ہیں ---
-# جتنا کوائن زیادہ اچھلتا کودتا (volatile) ہوگا، اتنا ہی سٹاپ لاس خودکار دور ہوگا،
-# اور جتنا پرسکون ہوگا اتنا ہی سٹاپ قریب رہے گا۔
+# سٹاپ لاس اور ٹارگٹس ATR پر مبنی ہیں:
+# جتنا کوائن زیادہ volatile ہوگا، اتنا ہی سٹاپ خودکار دور ہوگا۔
 def calc_levels(signal_type, entry_price, atr):
     stop_distance = atr * ATR_STOP_MULTIPLIER
 
@@ -231,7 +197,7 @@ def save_signal(symbol, signal_type, entry_price, rsi, atr):
     r2 = requests.post(last_signal_url, headers=SB_HEADERS, json=payload2, timeout=20)
     r2.raise_for_status()
 
-    print(f"Signal saved: {symbol} -> {signal_type} @ {entry_price} (ATR={atr}, SL={stop_loss})")
+    print(f"Signal saved: {symbol} -> {signal_type} @ {entry_price} (ATR={atr}, SL={stop_loss}, TP1={targets[0]})")
 
 
 def main():
@@ -245,6 +211,10 @@ def main():
     for symbol in symbols:
         try:
             klines = get_klines(symbol, interval="1h", limit=100)
+            # Binance آخری کینڈل ادھوری (ابھی جاری) بھیجتا ہے، اسے ہٹا دیں
+            # تاکہ سگنل صرف مکمل بند ہو چکی کینڈلز پر بنے
+            klines = klines[:-1]
+
             highs = [float(k[2]) for k in klines]
             lows = [float(k[3]) for k in klines]
             closes = [float(k[4]) for k in klines]
@@ -258,9 +228,6 @@ def main():
                     continue
                 if has_open_position(symbol):
                     print(f"Skip {symbol}: already has an open position.")
-                    continue
-                if is_in_cooldown(symbol):
-                    print(f"Skip {symbol}: cooldown active.")
                     continue
                 if not atr or atr <= 0:
                     print(f"Skip {symbol}: invalid ATR.")

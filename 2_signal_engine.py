@@ -19,6 +19,18 @@ BINANCE_BASE = "https://data-api.binance.vision"
 
 EXCLUDE_SUFFIXES = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
 
+# اسٹیبل کوائنز اور فیاٹ کرنسی جوڑے: ان کی قیمت تقریباً ایک ہی رہتی ہے،
+# اس لیے یہاں سگنل بے معنی ہیں (اور فیس کے بعد یقینی نقصان)
+EXCLUDE_BASES = {
+    "USDC", "FDUSD", "TUSD", "USDP", "USD1", "RLUSD", "U", "USDE", "BFUSD",
+    "XUSD", "PYUSD", "DAI", "USDS", "BUSD", "USDD", "FRAX", "LUSD",
+    "EUR", "EURI", "AEUR", "GBP", "TRY", "BRL", "ARS", "UAH", "PLN", "RON", "CZK", "JPY",
+}
+
+# 1 گھنٹے کی کینڈل میں ATR قیمت کے اس فیصد سے کم ہو تو کوائن بہت پرسکون ہے،
+# سٹاپ اتنا قریب بنے گا کہ فیس ہی کھا جائے گی — ایسے کوائن چھوڑ دیے جائیں
+MIN_ATR_PCT = 0.0025  # 0.25%
+
 
 def get_top_usdt_symbols(limit=100):
     resp = requests.get(f"{BINANCE_BASE}/api/v3/ticker/24hr", timeout=20)
@@ -26,7 +38,9 @@ def get_top_usdt_symbols(limit=100):
     data = resp.json()
     usdt_pairs = [
         d for d in data
-        if d["symbol"].endswith("USDT") and not d["symbol"].endswith(EXCLUDE_SUFFIXES)
+        if d["symbol"].endswith("USDT")
+        and not d["symbol"].endswith(EXCLUDE_SUFFIXES)
+        and d["symbol"][:-4] not in EXCLUDE_BASES
     ]
     usdt_pairs.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
     return [p["symbol"] for p in usdt_pairs[:limit]]
@@ -233,6 +247,9 @@ def main():
                     print(f"Skip {symbol}: invalid ATR.")
                     continue
                 entry_price = closes[-1]
+                if atr / entry_price < MIN_ATR_PCT:
+                    print(f"Skip {symbol}: volatility too low.")
+                    continue
                 save_signal(symbol, signal_type, entry_price, rsi, atr)
                 signals_found += 1
 

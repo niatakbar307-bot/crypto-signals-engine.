@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import requests
 from datetime import datetime, timezone
@@ -18,6 +19,23 @@ SB_HEADERS = {
 
 BINANCE_BASE = "https://data-api.binance.vision"
 
+# پوزیشن کھلنے کے بعد کی 5 منٹ کی کینڈلز کے High/Low دیکھے جائیں گے،
+# تاکہ دو چیکس کے درمیان ہونے والی حرکت (wick) بھی نہ چھوٹے۔
+CANDLE_INTERVAL = "5m"
+CANDLE_MS = 5 * 60 * 1000
+
+
+def parse_time(ts):
+    """Supabase کا وقت پڑھتا ہے (اعشاریہ کے ہندسے کم زیادہ ہوں تب بھی چلتا ہے)"""
+    ts = ts.replace("Z", "+00:00")
+    m = re.match(r"(.+?)\.(\d+)(.*)", ts)
+    if m:
+        ts = f"{m.group(1)}.{m.group(2)[:6].ljust(6, '0')}{m.group(3)}"
+    dt = datetime.fromisoformat(ts)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
 
 def get_open_positions():
     url = f"{SUPABASE_URL}/rest/v1/positions"
@@ -27,43 +45,92 @@ def get_open_positions():
     return resp.json()
 
 
-def get_current_price(symbol):
-    resp = requests.get(f"{BINANCE_BASE}/api/v3/ticker/price", params={"symbol": symbol}, timeout=20)
+def get_candles_since(symbol, start_ms):
+    candles = []
+    while True:
+        params = {
+            "symbol": symbol,
+            "interval": CANDLE_INTERVAL,
+            "startTime": start_ms,
+            "limit": 1000,
+        }
+        resp = requests.get(f"{BINANCE_BASE}/api/v3/klines", params=params, timeout=20)
+        resp.raise_for_status()
+        batch = resp.json()
+        if not batch:
+            break
+        candles.extend(batch)
+        if len(batch) < 1000:
+            break
+        start_ms = batch[-1][0] + CANDLE_MS
+    return candles
+
+
+def evaluate_position(signal_type, stop_loss, target, candles):
+    """
+    کینڈلز کو وقت کی ترتیب سے دیکھتا ہے:
+    - پہلے سٹاپ لاس لگا -> LOSS
+    - پہلے ٹارگٹ لگا -> WIN
+    - اگر ایک ہی کینڈل میں دونوں لگیں تو محتاط رہتے ہوئے LOSS شمار ہوگا
+    """
+    for c in candles:
+        high = float(c[2])
+        low = float(c[3])
+        if signal_type == "BUY":
+            hit_stop = low <= stop_loss
+            hit_target = high >= target
+        else:
+            hit_stop = high >= stop_loss
+            hit_target = low <= target
+
+        if hit_stop:
+            return "LOSS", stop_loss
+        if hit_target:
+            return "WIN", target
+    return None, None
+
+
+def result_exists(position_id):
+    url = f"{SUPABASE_URL}/rest/v1/results"
+    params = {"position_id": f"eq.{position_id}", "select": "id", "limit": "1"}
+    resp = requests.get(url, headers=SB_HEADERS, params=params, timeout=20)
     resp.raise_for_status()
-    return float(resp.json()["price"])
+    return len(resp.json()) > 0
 
 
-def close_position(position_id, targets_hit, status):
-    url = f"{SUPABASE_URL}/rest/v1/positions"
-    params = {"id": f"eq.{position_id}"}
-    payload = {
-        "status": status,
-        "targets_hit": targets_hit,
-        "closed_at": datetime.now(timezone.utc).isoformat(),
-    }
-    r = requests.patch(url, headers=SB_HEADERS, params=params, json=payload, timeout=20)
-    r.raise_for_status()
-
-
-def save_result(symbol, signal_type, entry_price, exit_price, outcome):
+def save_result(position_id, symbol, signal_type, entry_price, exit_price, outcome):
     if signal_type == "BUY":
-        profit_pct = (exit_price - entry_price) / entry_price * 100
+        pnl = (exit_price - entry_price) / entry_price * 100
     else:
-        profit_pct = (entry_price - exit_price) / entry_price * 100
+        pnl = (entry_price - exit_price) / entry_price * 100
 
     url = f"{SUPABASE_URL}/rest/v1/results"
     payload = {
+        "position_id": position_id,
         "symbol": symbol,
         "signal_type": signal_type,
         "entry_price": entry_price,
         "exit_price": exit_price,
         "outcome": outcome,
-        "profit_pct": round(profit_pct, 2),
+        "pnl_percent": round(pnl, 2),
+        "profit_pct": round(pnl, 2),
         "closed_at": datetime.now(timezone.utc).isoformat(),
     }
     r = requests.post(url, headers=SB_HEADERS, json=payload, timeout=20)
     r.raise_for_status()
-    print(f"Result saved: {symbol} {outcome} {profit_pct:.2f}%")
+    print(f"Result saved: {symbol} {outcome} {pnl:.2f}%")
+
+
+def close_position(position_id, outcome):
+    url = f"{SUPABASE_URL}/rest/v1/positions"
+    params = {"id": f"eq.{position_id}"}
+    payload = {
+        "status": "closed" if outcome == "WIN" else "stopped",
+        "targets_hit": 1 if outcome == "WIN" else 0,
+        "closed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    r = requests.patch(url, headers=SB_HEADERS, params=params, json=payload, timeout=20)
+    r.raise_for_status()
 
 
 def main():
@@ -73,41 +140,35 @@ def main():
 
     for pos in positions:
         symbol = pos["symbol"]
-        signal_type = pos["signal_type"]
-        entry_price = float(pos["entry_price"])
-        stop_loss = pos.get("stop_loss")
-        targets = [pos.get(f"target_{i}") for i in range(1, 6)]
-
-        if stop_loss is None or any(t is None for t in targets):
-            continue
-
         try:
-            current_price = get_current_price(symbol)
+            signal_type = pos["signal_type"]
+            entry_price = float(pos["entry_price"])
+            stop_loss = pos.get("stop_loss")
+            target = pos.get("target_1")
+            created_at = pos.get("created_at")
+
+            if stop_loss is None or target is None or not created_at:
+                print(f"Skip {symbol}: incomplete position data.")
+                continue
+
+            stop_loss = float(stop_loss)
+            target = float(target)
+            start_ms = int(parse_time(created_at).timestamp() * 1000)
+
+            candles = get_candles_since(symbol, start_ms)
+            outcome, exit_price = evaluate_position(signal_type, stop_loss, target, candles)
+
+            if outcome is None:
+                print(f"{symbol}: still open.")
+                continue
+
+            if not result_exists(pos["id"]):
+                save_result(pos["id"], symbol, signal_type, entry_price, exit_price, outcome)
+            close_position(pos["id"], outcome)
+
         except Exception as e:
-            print(f"Error fetching price for {symbol}: {e}")
+            print(f"Error processing {symbol}: {e}")
             continue
-
-        hit_stop = (
-            current_price <= stop_loss if signal_type == "BUY" else current_price >= stop_loss
-        )
-        if hit_stop:
-            close_position(pos["id"], pos.get("targets_hit", 0), "stopped")
-            save_result(symbol, signal_type, entry_price, current_price, "LOSS")
-            continue
-
-        targets_hit = 0
-        for t in targets:
-            reached = current_price >= t if signal_type == "BUY" else current_price <= t
-            if reached:
-                targets_hit += 1
-
-        if targets_hit >= 5:
-            close_position(pos["id"], targets_hit, "closed")
-            save_result(symbol, signal_type, entry_price, current_price, "WIN")
-        elif targets_hit > pos.get("targets_hit", 0):
-            url = f"{SUPABASE_URL}/rest/v1/positions"
-            params = {"id": f"eq.{pos['id']}"}
-            requests.patch(url, headers=SB_HEADERS, params=params, json={"targets_hit": targets_hit}, timeout=20)
 
     print("Done checking results.")
 

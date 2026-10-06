@@ -20,12 +20,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r 3_requirements-1.txt
 
-      - name: Run signal engine
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python 2_signal_engine.py
-
       - name: Run top gainers engine
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

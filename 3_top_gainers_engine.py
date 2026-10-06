@@ -16,6 +16,7 @@ SB_HEADERS = {
 }
 
 FAPI_BASE = "https://fapi.binance.com"
+SPOT_BASE = "https://data-api.binance.vision"
 
 EXCLUDE_SUFFIXES = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
 
@@ -39,7 +40,9 @@ ATR_TARGET_MULTIPLIERS = (8.0, 11.0, 14.0, 17.0, 20.0)  # 1:2 تناسب برق�
 
 
 def get_24h_tickers():
-    resp = requests.get(f"{FAPI_BASE}/fapi/v1/ticker/24hr", timeout=20)
+    # Spot API استعمال ہو رہا ہے (futures fapi.binance.com کبھی کبھار
+    # GitHub Actions کے سرورز کو geo-block کر دیتا ہے — 451 error)
+    resp = requests.get(f"{SPOT_BASE}/api/v3/ticker/24hr", timeout=20)
     resp.raise_for_status()
     return resp.json()
 
@@ -75,7 +78,7 @@ def get_top_gainers():
 
 def get_klines(symbol, interval="1h", limit=100):
     params = {"symbol": symbol, "interval": interval, "limit": limit}
-    resp = requests.get(f"{FAPI_BASE}/fapi/v1/klines", params=params, timeout=20)
+    resp = requests.get(f"{SPOT_BASE}/api/v3/klines", params=params, timeout=20)
     resp.raise_for_status()
     return resp.json()
 

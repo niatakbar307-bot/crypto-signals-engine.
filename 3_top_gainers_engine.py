@@ -35,8 +35,11 @@ MIN_RSI = 60                # RSI(14) اتنے سے اوپر ہو تو momentum 
 
 RSI_PERIOD = 14
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 4.0    # معمول سے کہیں زیادہ وسیع — pump کوائنز میں عام مارکیٹ سے کئی گنا تیز اتار چڑھاؤ ہوتا ہے
-ATR_TARGET_MULTIPLIERS = (8.0, 11.0, 14.0, 17.0, 20.0)  # 1:2 تناسب برقرار، مگر فاصلہ بھی اتنا ہی بڑا
+# سٹاپ/ٹارگٹ اب ATR کی بجائے سیدھا قیمت کے فیصد پر مبنی ہیں — یہ زیادہ
+# حقیقت پسندانہ اور قابلِ حصول ہیں، خاص طور پر ان کوائنز پر جو پہلے ہی بڑا
+# pump کر چکے ہوتے ہیں (جہاں مزید چھوٹا سا منافع بھی حقیقی ہوتا ہے)۔
+STOP_PCT = 0.02                                      # سٹاپ لاس: entry سے 2% نیچے
+TARGET_PCTS = (0.034, 0.058, 0.073, 0.081, 0.091)    # پانچ ٹارگٹس، تدریجاً دور
 
 
 def get_24h_tickers():
@@ -130,14 +133,14 @@ def has_open_position(symbol):
     return len(resp.json()) > 0
 
 
-def calc_levels(entry_price, atr):
-    stop_loss = entry_price - (atr * ATR_STOP_MULTIPLIER)
-    targets = [entry_price + (atr * m) for m in ATR_TARGET_MULTIPLIERS]
+def calc_levels(entry_price):
+    stop_loss = entry_price * (1 - STOP_PCT)
+    targets = [entry_price * (1 + p) for p in TARGET_PCTS]
     return stop_loss, targets
 
 
 def save_signal(symbol, rank, change_pct, entry_price, rsi, atr):
-    stop_loss, targets = calc_levels(entry_price, atr)
+    stop_loss, targets = calc_levels(entry_price)
     positions_url = f"{SUPABASE_URL}/rest/v1/positions"
     payload = {
         "symbol": symbol,

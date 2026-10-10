@@ -31,7 +31,7 @@ EXCLUDE_BASES = {
 TOP_N = 5                  # 24h gainers لسٹ میں ٹاپ کتنے نمبر تک سگنل شمار ہوگا
 MIN_24H_CHANGE_PCT = 15.0  # کم از کم اتنی 24h تبدیلی ہو تبھی حقیقی pump شمار ہوگا
 MIN_QUOTE_VOLUME = 20_000_000  # کم از کم 24h USDT ٹرن اوور (چھوٹے/پتلے کوائنز باہر)
-MIN_RSI = 60                # RSI(14) اتنے سے اوپر ہو تو momentum کی تصدیق
+MIN_RSI = 50                # RSI(14) اتنے سے اوپر ہو تو momentum کی تصدیق
 
 RSI_PERIOD = 14
 ATR_PERIOD = 14
